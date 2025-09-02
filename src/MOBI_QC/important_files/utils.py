@@ -4,14 +4,24 @@ import tarfile
 from io import BytesIO
 import os
 import platform
-
+import re
+import json
 import numpy as np
 import sounddevice as sd
 from glob import glob
 from tqdm import tqdm
 import datetime
 from stim_correction import trigger_recovery
+from scipy.interpolate import interp1d
 
+
+def load_default_event(xdf_filename, config_path="default_event.json"):
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    for task, event in config.items():
+        if task.lower() in xdf_filename.lower():
+            return event
+    return None
 
 def get_collection_date(xdf_filename:str):
     if platform.system() == 'Windows':
@@ -24,6 +34,15 @@ def get_collection_date(xdf_filename:str):
         except AttributeError:
             # Fallback: use modification time instead
             return datetime.datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        
+def get_stream_names(xdf_obj):
+    if isinstance(xdf_obj, tuple):
+        streams = xdf_obj[0]
+    elif isinstance(xdf_obj, list):
+        streams = xdf_obj
+    else:
+        raise TypeError(f"Unsupported type: {type(xdf_obj)}")
+    return {stream['info']['name'][0]: i for i, stream in enumerate(streams)}
 
 def import_webcam_data(xdf_filename:str):    
     cam_data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'name': 'WebcamStream'}], verbose=False)
@@ -51,6 +70,18 @@ def import_physio_data(xdf_filename:str):
     df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
     return df
 
+def import_ecg_data(xdf_filename:str):
+    df = import_physio_data(xdf_filename)
+    ecg_col = [col for col in df.columns if 'ECG' in col]
+    if ecg_col:
+        ecg_col = ecg_col[0]
+        df = df[[ecg_col, 'lsl_time_stamp', 'time']]
+    else:
+        print('Missing ECG data in physio dataset')
+        return None, None
+
+    return ecg_col, df
+
 def import_mic_data(xdf_filename:str):
     data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'type': 'AudioCapture'}], verbose = False)
     df = pd.DataFrame(data[0]['time_series'], columns=['int_array'])
@@ -76,11 +107,69 @@ def import_video_data(xdf_filename:str):
     df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
     return df
 
+def find_et_stream_name(streams:dict):
+    for stream in streams:
+        if any(string for string in ['eye', 'tracker'] if string in stream.lower()):
+            return stream
+def convert_cols_to_num(df:pd.DataFrame):
+    slash_cols = [ind for ind, data in enumerate(df.loc[0]) if isinstance(data, str) and '/' in data]
+    for col in df:
+        if col in df.columns[slash_cols]:
+            df[col] = df[col].apply(lambda data: [float(x) for x in data.split('/')])
+        else:
+            df[col] = pd.to_numeric(df[col])
+
+    return df
+
+def align_and_resample(df1, df2, srate=30, time_col="time"):
+    # Ensure numeric time
+    df1 = df1.copy()
+    df2 = df2.copy()
+    df1[time_col] = pd.to_numeric(df1[time_col], errors="coerce")
+    df2[time_col] = pd.to_numeric(df2[time_col], errors="coerce")
+
+    # Drop NaN times and sort
+    df1 = df1.dropna(subset=[time_col]).sort_values(time_col)
+    df2 = df2.dropna(subset=[time_col]).sort_values(time_col)
+
+    # Find overlapping time range
+    t0 = max(df1[time_col].iloc[0], df2[time_col].iloc[0])
+    t1 = min(df1[time_col].iloc[-1], df2[time_col].iloc[-1])
+
+    # 30 Hz target time vector
+    target_time = np.arange(t0, t1, 1/srate)
+
+    def resample_numeric(df):
+        out = pd.DataFrame({time_col: target_time})
+        for col in df.columns:
+            if col == time_col:
+                continue
+            if pd.api.types.is_numeric_dtype(df[col]):
+                f = interp1d(df[time_col], df[col], kind='linear', bounds_error=False, fill_value=np.nan)
+                out[col] = f(target_time)
+            else:
+                # Nearest neighbor for non-numeric
+                idx = np.searchsorted(df[time_col], target_time)
+                idx = np.clip(idx, 0, len(df)-1)
+                out[col] = df[col].values[idx]
+        return out
+
+    et_resampled = resample_numeric(df1)
+    bh_resampled = resample_numeric(df2)
+
+    # Merge on the time column
+    merged = pd.merge(et_resampled, bh_resampled, on=time_col, suffixes=("_et", "_bh"))
+    return merged
+
 def import_et_data(xdf_filename:str):
-    data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'type': 'ET'}], verbose = False)
-    column_labels = [data[0]['info']['desc'][0]['channels'][0]['channel'][i]['label'][0] for i in range(len(data[0]['info']['desc'][0]['channels'][0]['channel']))]
-    df = pd.DataFrame(data[0]['time_series'], columns=column_labels)
-    df['lsl_time_stamp'] = data[0]['time_stamps']
+    data, _ = pyxdf.load_xdf(xdf_filename, verbose = False)
+    streams = get_stream_names(data)
+    et_stream_name = find_et_stream_name(streams)
+    data = data[streams[et_stream_name]]
+    column_labels = [data['info']['desc'][0]['channels'][0]['channel'][i]['label'][0] for i in range(len(data['info']['desc'][0]['channels'][0]['channel']))]
+    df = pd.DataFrame(data['time_series'], columns=column_labels)
+    df = convert_cols_to_num(df)
+    df['lsl_time_stamp'] = data['time_stamps']
     df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
     df['diff'] = df.lsl_time_stamp.diff()
     return df
@@ -93,6 +182,32 @@ def import_eeg_data(xdf_filename:str):
     #df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
     return df
 
+def reformat_events(stim_df: pd.DataFrame, task:str=None):
+    onset_mask = stim_df['event'].str.contains('onset', case=False, na=False)
+    stim_df.loc[onset_mask, 'event'] = stim_df.loc[onset_mask, 'event'].apply(
+        lambda x: re.sub(r'^[Oo]nset[\s_]+', 'Onset_', str(x))
+    )
+
+    onset_events = stim_df.loc[onset_mask, 'event'].str.replace(r'^Onset_', '', regex=True)
+
+    for event in onset_events.unique():
+        expected_offset = f"Offset_{event}"
+
+        if not stim_df['event'].eq(expected_offset).any():
+            pattern = rf'^[Oo]ffset[\s_]*{re.escape(event)}|TaskEnded[\s_]*{re.escape(event)}'
+            candidate_mask = stim_df['event'].str.contains(pattern, case=False, na=False)
+            stim_df.loc[candidate_mask, 'event'] = expected_offset
+
+    if task.lower() == 'nasa':
+        Onset_LeanEnd_ind = np.where(stim_df['event']=='Onset_LeanEnd')[0][0]
+        stim_df = stim_df.drop(index=[Onset_LeanEnd_ind]).reset_index(drop=True)
+        stim_df.loc[0, 'event'], stim_df.loc[stim_df.index[-1], 'event'] = 'Onset_Nasa', 'Offset_Nasa'
+        Onset_Supine2_ind = np.where(stim_df['event']=='Onset_Supine2')[0][0]
+        Offset_Supine2_ind = Onset_Supine2_ind + np.where(stim_df.loc[Onset_Supine2_ind:]['event'].str.contains('Offset_Supine'))[0][0]
+        stim_df.loc[Offset_Supine2_ind, 'event'] = 'Offset_Supine2'
+
+    return stim_df
+
 def import_stim_data(xdf_filename:str):
     '''
     Get the stimuli dataframe from the xdf file.
@@ -100,59 +215,27 @@ def import_stim_data(xdf_filename:str):
     Args:
         xdf_filename (str): The xdf file to get the stimuli from.
     '''
-    data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'name':'Stimuli_Markers'}], verbose = False)
+    data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'name':'StimLabels'}], verbose = False)
     stim_df = pd.DataFrame(data[0]['time_series'])
-    stim_df.rename(columns={0: 'trigger'}, inplace=True)
+    stim_df.rename(columns={0: 'event'}, inplace=True)
+    task = xdf_filename.split('/')[-1].split('task-')[-1].split('_')[0]
 
+    # MAY NEED TO BE REFORMATTED/Have more codes/events added
     events = {
-        200: 'Onset_Experiment',
-        10: 'Onset_RestingState',
-        11: 'Offset_RestingState',
-        500: 'Onset_StoryListening',
-        501: 'Offset_StoryListening',
-        100: 'Onset_10second_rest',
-        101: 'Offset_10second_rest', 
-        20: 'Onset_CampFriend',
-        21: 'Offset_CampFriend',
-        30: 'Onset_FrogDissection',
-        31: 'Offset_FrogDissection',
-        40: 'Onset_DanceContest',
-        41: 'Offset_DanceContest',
-        50: 'Onset_ZoomClass',
-        51: 'Offset_ZoomClass',
-        60: 'Onset_Tornado',
-        61: 'Offset_Tornado',
-        70: 'Onset_BirthdayParty',
-        71: 'Offset_BirthdayParty',
-        300: 'Onset_subjectInput',
-        301: 'Offset_subjectInput',
-        302: 'Onset_FavoriteStory',
-        303: 'Offset_FavoriteStory',
-        304: 'Onset_WorstStory',
-        305: 'Offset_WorstStory',
-        400: 'Onset_impedanceCheck',
-        401: 'Offset_impedanceCheck',
-        80: 'Onset_SocialTask',
-        81: 'Offset_SocialTask',
-        201: 'Offset_Experiment',
+        'Onset_CPT': 200,
+        'Onset_Crash': 10,
+        'Offset_Crash': 11,
+        'Offset_CPT': 201
     }
 
-    story_onsets = [20, 30, 40, 50, 60, 70]
+    stim_df['trigger'] = stim_df['event'].apply(lambda event: events[event] if event in events else np.nan)
 
-    # relabel the event if the trigger is in the events dictionary, else if 
-    stim_df['event'] = stim_df['trigger'].apply(lambda x: events[x] if x in events.keys() else 'Bx_input')
-
+    # COME BACK TO THESE TIME THINGS
     # relabel the event as a psychopy timestamp if the trigger is greater than 5 digits
     stim_df.loc[stim_df.trigger.astype(str).str.len() > 5, 'event'] = 'psychopy_time_stamp'
     stim_df['lsl_time_stamp'] = data[0]['time_stamps']
-    #stim_df['time'] = (data[0]['time_stamps'] - data[0]['time_stamps'][0])
-
-    dt = datetime.datetime.fromtimestamp(stim_df.loc[stim_df.event == "psychopy_time_stamp", "trigger"].to_list()[0])#.strftime('%Y-%m-%d %H:%M:%S')
-    # check if date after 03/25/2025
-    
-    if (dt > datetime.datetime(2025, 3, 25)) & (dt < datetime.datetime(2025, 5, 23)):
-        print('trigger recovery')
-        stim_df = trigger_recovery(stim_df, xdf_filename)
+    stim_df['time'] = (data[0]['time_stamps'] - data[0]['time_stamps'][0])
+    stim_df = reformat_events(stim_df, task=task)
     
     return stim_df
 
@@ -168,6 +251,8 @@ def get_event_data(event, df, stim_df):
     Returns:
         pd.DataFrame: The  data corresponding to the event.
         """
+    if event == None:
+        return df
     new_df = df.loc[(df['lsl_time_stamp'] >= stim_df.loc[stim_df['event'] == 'Onset_'+event, 'lsl_time_stamp'].values[0]) & 
                   (df['lsl_time_stamp'] <= stim_df.loc[stim_df['event'] == 'Offset_'+event, 'lsl_time_stamp'].values[0])].copy().reset_index(drop = True)
     return new_df

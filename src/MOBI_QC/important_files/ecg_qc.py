@@ -12,6 +12,9 @@ from scipy.signal import iirnotch, filtfilt
 from glob import glob
 import neurokit2 as nk
 from neurokit2.signal import signal_power
+import argparse
+import sys
+import json
 
 def ecg_preprocess(ecg_df: pd.DataFrame, ecg_sampling_rate: float) -> tuple[pd.DataFrame,dict]:
     """
@@ -23,7 +26,7 @@ def ecg_preprocess(ecg_df: pd.DataFrame, ecg_sampling_rate: float) -> tuple[pd.D
         ecg_signals (pd.DataFrame): Processed ECG signals.
         info (dict): Additional information about the ECG processing.
     """
-    ecg_signals, info = nk.ecg_process(ecg_df['ECG1'], sampling_rate=ecg_sampling_rate, method='neurokit')
+    ecg_signals, info = nk.ecg_process(ecg_df['ECG'], sampling_rate=ecg_sampling_rate, method='neurokit')
     return ecg_signals, info
 
 def average_heartrate(ecg_signals: pd.DataFrame) -> float:
@@ -178,7 +181,7 @@ def ecg_report_plot(ecg_signals:pd.DataFrame, info: dict, subject:str) -> plt:
 
     return plt
 
-def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame, task='RestingState') -> tuple[dict, plt, pd.DataFrame, bool]:
+def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame=False, event=None) -> tuple[dict, plt, pd.DataFrame, bool]:
     """
     Performs quality control on ECG data from an XDF file.
     Args:
@@ -189,21 +192,25 @@ def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame, task='RestingState') -> tuple
         ecg_error (bool): Indicates whether there was an error loading ECG data. 
     """
     subject = xdf_filename.split('sub-')[1].split('/')[0]
-    whole_ps_df = import_physio_data(xdf_filename)
     vars = {}
     vars['event'], vars['sampling_rate'], vars['average_heart_rate'], vars['kurtosis_SQI'], vars['power_spectrum_distribution_SQI'], vars['relative_baseline_power_sqi'], vars['SNR'] = np.zeros(7)  
 
     try:
-        ps_df = get_event_data(event=task,
-                        df=whole_ps_df,
-                        stim_df=stim_df)
-        ecg_df = ps_df[['ECG1', 'lsl_time_stamp', 'time']]
+        ecg_col, ecg_df = import_ecg_data(xdf_filename)
+        if not stim_df:
+            stim_df = import_stim_data(xdf_filename)
+        ecg_df = get_event_data(event=event,
+                                df=ecg_df,
+                                stim_df=stim_df)
+        if ecg_col:
+            ecg_df = ecg_df[[ecg_col, 'lsl_time_stamp', 'time']]
+            ecg_df = ecg_df.rename(columns={ecg_col:'ECG'})
 
         ecg_sampling_rate = get_sampling_rate(ecg_df)  
         ecg_signals, info = ecg_preprocess(ecg_df, ecg_sampling_rate)
         ecg_cleaned = ecg_signals['ECG_Clean']
 
-        vars['event'] = task
+        vars['event'] = event
         print(f"Effective sampling rate: {ecg_sampling_rate}")
         vars['sampling_rate'] = ecg_sampling_rate
         print(f"Average heart rate: {average_heartrate(ecg_signals)}")
@@ -220,20 +227,62 @@ def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame, task='RestingState') -> tuple
         fig = ecg_report_plot(ecg_signals, info, subject)
 
         ecg_error = False
-        return vars, fig, whole_ps_df, ecg_error 
+        return vars, fig, ecg_df, ecg_error 
 
     except KeyError:
         print(f'Error: No ECG data found for participant {subject} in {xdf_filename}.')
         vars.update({key: float('nan') for key in vars.keys()})
         ecg_error = True
-        return vars, None, whole_ps_df, ecg_error
+        return vars, None, ecg_df, ecg_error
 
 #%% 
 # allow the functions in this script to be imported into other scripts
 if __name__ == "__main__":
-    pass
+    parser = argparse.ArgumentParser(description="Run ECG QC script")
+    parser.add_argument("xdf_filename", help="Path to the XDF file")
+    parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
+    parser.add_argument("--event", default=None, help="Optional event name to override default")
 
-# %%
-# allow the functions in this script to be imported into other scripts
-if __name__ == "__main__":
-    pass
+    args = parser.parse_args()
+
+    xdf_filename = args.xdf_filename
+    stim_fpath = args.stim_fpath
+    event_arg = args.event
+
+    if not os.path.exists(xdf_filename):
+        print(f"Error: file not found -> {xdf_filename}")
+        sys.exit(1)
+
+    if stim_fpath:
+        if not os.path.exists(stim_fpath):
+            print(f"Error: file not found -> {stim_fpath}")
+            sys.exit(1)
+
+        try:
+            if stim_fpath.endswith('.csv'):
+                stim_df = pd.read_csv(stim_fpath)
+            elif stim_fpath.endswith('.parquet'):
+                stim_df = pd.read_parquet(stim_fpath, engine='fastparquet')
+            else:
+                print("Error: stim file must be .csv or .parquet")
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error reading stim file: {e}")
+            sys.exit(1)
+    else:
+        stim_df = False
+
+    default_event = load_default_event(xdf_filename)
+    if default_event is None:
+        print("Warning: no default event found for this task")
+        event = None
+    else:
+        event = default_event
+    if event_arg is not None:
+        event = event_arg
+
+    try:
+        ecg_qc(xdf_filename, stim_df, event=event)
+    except Exception as e:
+        print(f"Error running ecg_qc: {e}")
+        sys.exit(1)
