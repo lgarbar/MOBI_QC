@@ -172,6 +172,16 @@ def import_et_data(xdf_filename:str):
     df['lsl_time_stamp'] = data['time_stamps']
     df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
     df['diff'] = df.lsl_time_stamp.diff()
+
+    df['pupil_left'] = df['pupil_diam'].apply(lambda x: x[0])
+    df['pupil_right'] = df['pupil_diam'].apply(lambda x: x[1])
+
+    df['pupil_mean'] = df[['pupil_left', 'pupil_right']].apply(
+        lambda row: row[row != 0].mean(),
+        axis=1
+    )
+    df['pupil_smooth'] = df['pupil_mean'].rolling(window=5, center=True).mean()
+    df['pupil_smooth'] = df['pupil_smooth'].fillna(df['pupil_mean'])
     return df
 
 def import_eeg_data(xdf_filename:str):

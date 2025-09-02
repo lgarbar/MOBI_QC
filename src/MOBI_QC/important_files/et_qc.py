@@ -6,6 +6,8 @@ import datetime
 import re
 import matplotlib.pyplot as plt
 from utils import *
+import sys
+import argparse
 
 def et_val(et_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -40,13 +42,33 @@ def et_invalid_data(et_df: pd.DataFrame) -> tuple[float, float, float, float, fl
     Returns:
         left_gaze_point_invalid, right_gaze_point_invalid, left_gaze_origin_invalid, right_gaze_origin_invalid, left_pupil_invalid, right_pupil_invalid (floats): Decimals representing amount of data invalid from each variable.
     """
-    left_gaze_point_invalid = (1 - et_df.left_gaze_point_validity.mean()) * 100 
-    right_gaze_point_invalid = (1 - et_df.right_gaze_point_validity.mean()) * 100
-    left_gaze_origin_invalid = (1 - et_df.left_gaze_origin_validity.mean()) * 100
-    right_gaze_origin_invalid = (1 - et_df.right_gaze_origin_validity.mean()) * 100
-    left_pupil_invalid = (1 - et_df.left_pupil_validity.mean()) * 100
-    right_pupil_invalid = (1 - et_df.right_pupil_validity.mean()) * 100
-    return left_gaze_point_invalid, right_gaze_point_invalid, left_gaze_origin_invalid, right_gaze_origin_invalid, left_pupil_invalid, right_pupil_invalid 
+    et_df['invalid'] = 0
+    et_df['blink_filt'] = 0
+    et_df['off_screen_filt'] = 0
+
+    # masks
+    blink_mask = et_df['blink_confidence'].apply(lambda data: data[0] > 0.5 or data[1] > 0.5)
+    offscreen_mask = et_df['ET3S_scene_number'] != 0
+
+    # mark blinks
+    et_df.loc[blink_mask, 'blink_filt'] = 1
+    et_df.loc[blink_mask, 'invalid'] = 1
+
+    # mark off-screen
+    et_df.loc[offscreen_mask, 'off_screen_filt'] = 1
+    et_df.loc[offscreen_mask, 'invalid'] = 1
+
+    blink_filt = et_df[et_df['blink_filt'] == 1]
+    off_screen_filt = et_df[et_df['off_screen_filt'] == 1]
+    invalid_filt = et_df[et_df['invalid'] == 1]
+    et_df_filt = et_df[et_df['invalid'] == 0]
+
+    blink_perc = np.round((len(blink_filt) / len(et_df)) * 100, 2)
+    off_screen_perc = np.round((len(off_screen_filt) / len(et_df)) * 100, 2)
+    invalid_perc = np.round((len(invalid_filt) / len(et_df)) * 100, 2)
+    valid_perc = np.round((len(et_df_filt) / len(et_df)) * 100, 2)
+
+    return et_df, blink_perc, off_screen_perc, invalid_perc, valid_perc
 
 def xyz_measures_check(val_df: pd.DataFrame) -> bool:
     """
@@ -99,96 +121,33 @@ def coordinate_system_check(val_df: pd.DataFrame) -> bool:
 
     return val_flag2
 
-def et_val_LR(val_df: pd.DataFrame) -> float:
+def pupil_validity_stats(et_df_filt: pd.DataFrame) -> dict:
     """
-    Compare the percentage of valid data between left and right eyes.
-    Args:
-        val_df (pd.DataFrame): Dataframe containing the percentage of valid data for each variable.
-    Returns:
-        mean_diff (float): Absolute difference of mean percentage of valid data between left and right eyes.
-    """
-    # compare valid data between left and right eyes
-    left = val_df[val_df.variable.str.startswith('left')]
-    right = val_df[val_df.variable.str.startswith('right')]
-
-    RL_val = pd.DataFrame(columns = ['eye','min', 'max', 'mean'])
-
-    for i, (df, RL) in enumerate([(left, 'left'), (right, 'right')]):
-        min1 = min(df['percent_valid'])
-        max1 = max(df['percent_valid'])
-        mean1 = np.mean(df['percent_valid'])
-        RL_val.loc[i] = [RL, min1, max1, mean1]
-
-    # find diff between RL 
-    RL_val.loc[2] = ['diff', RL_val['min'].diff()[1], RL_val['max'].diff()[1], RL_val['mean'].diff()[1]]
-
-    # add blank row 
-    blank = pd.DataFrame([['', '', '', '']], columns = RL_val.columns)
-    RL_val = pd.concat([RL_val.iloc[:2], blank, RL_val.iloc[2:]])
-    RL_val.reset_index(drop=True, inplace=True) 
-
-    # mean 
-    lmean = RL_val.loc[RL_val.eye =='left', 'mean'][0]
-    rmean = RL_val.loc[RL_val.eye =='right', 'mean'][1]
-    mean_diff = RL_val.loc[RL_val.eye =='diff', 'mean'][3]
-
-    return abs(mean_diff) * 100
-
-def et_percent_over02(et_df: pd.DataFrame) -> float:
-    """
-    Calculate the percentage of data with gaze point differences of over 0.2 mm.
-    Args:
-        et_df (pd.DataFrame): Dataframe containing the eye-tracking data.
-    Returns:
-        percent_over02 (float): Percentage of data with gaze point differences of over 0.2 mm.
-    """
-    # distance between gaze points
-
-    # remove NaNs
-    et_nums = et_df[~np.isnan(et_df.left_gaze_point_on_display_area_0) &
-            ~np.isnan(et_df.left_gaze_point_on_display_area_1) &
-            ~np.isnan(et_df.right_gaze_point_on_display_area_0) &
-            ~np.isnan(et_df.right_gaze_point_on_display_area_1)]
+    Compute statistics on valid pupil data for left and right eyes.
     
-    # distribution of distance between gaze points
-    x1 = et_nums.right_gaze_point_on_display_area_0
-    x2 = et_nums.left_gaze_point_on_display_area_0
-    y1 = et_nums.right_gaze_point_on_display_area_1
-    y2 = et_nums.left_gaze_point_on_display_area_1
-    dists = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-
-    percent_over02 = sum(dists >= 0.2)/len(dists) * 100  
-    return percent_over02 
-
-
-def et_lineplot(et_df: pd.DataFrame, percent_over02: float, sub_id: str):
-    """
-    Create a line plot of the distance between left and right gaze points over time.
     Args:
-        et_df (pd.DataFrame): Dataframe containing the eye-tracking data.
-        percent_over02 (float): Percentage of data with gaze point differences of over 0.2 mm.
-        sub_id (str): Subject ID.
+        et_df_filt (pd.DataFrame): Filtered eyetracking DataFrame with 'pupil_left' and 'pupil_right' columns.
+        
+    Returns:
+        dict: Contains valid proportions and absolute difference between eyes.
     """
-    # calculate distances including NaNs
-    x1 = et_df.right_gaze_point_on_display_area_0
-    x2 = et_df.left_gaze_point_on_display_area_0
-    y1 = et_df.right_gaze_point_on_display_area_1
-    y2 = et_df.left_gaze_point_on_display_area_1
-    all_dists = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
-
-    # plt with x = index 
-    plt.figure(figsize=(10, 3))
-    plt.plot(et_df.time, all_dists)
-    plt.title(f"Distance Between Left and Right Gaze Points Over Time")
-    plt.axhline(y = 0.2, color = 'red', label = 'Gaze point difference = 0.2')
-    plt.ylabel("Gaze Point Difference (mm)")
-    plt.xlabel("Time (s)")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(f'report_images/{sub_id}_et_gazedifference.png')
+    left_valid_prop = len(et_df_filt[et_df_filt['pupil_left'] > 0]) / len(et_df_filt)
+    right_valid_prop = len(et_df_filt[et_df_filt['pupil_right'] > 0]) / len(et_df_filt)
+    abs_diff = abs(left_valid_prop - right_valid_prop)
+    
+    stats = {
+        'left_valid_prop': left_valid_prop,
+        'right_valid_prop': right_valid_prop,
+        'abs_diff': abs_diff,
+        'n_total': len(et_df_filt),
+        'n_left_valid': len(et_df_filt[et_df_filt['pupil_left'] > 0]),
+        'n_right_valid': len(et_df_filt[et_df_filt['pupil_right'] > 0])
+    }
+    
+    return stats
 
 
-def et_qc(xdf_filename: str, stim_df: pd.DataFrame, task = 'Experiment') -> tuple[dict, pd.DataFrame, str]:
+def et_qc(xdf_filename: str, stim_df: pd.DataFrame, event=None) -> tuple[dict, pd.DataFrame, str]:
     """
     Main function to extract eye tracking quality control metrics.
     Args:
@@ -207,39 +166,28 @@ def et_qc(xdf_filename: str, stim_df: pd.DataFrame, task = 'Experiment') -> tupl
 
     try:
         whole_et_df = import_et_data(xdf_filename)
-        et_df = get_event_data(event = task, df = whole_et_df, stim_df = stim_df)
+        if not stim_df:
+            stim_df = import_stim_data(xdf_filename)
+        et_df = get_event_data(event = event, df = whole_et_df, stim_df = stim_df)
 
         sampling_rate = get_sampling_rate(et_df)
-        val_df = et_val(et_df)
-        vars['event'] = task
+        vars['event'] = event
         vars['sampling_rate'] = sampling_rate
         print(f"Effective sampling rate: {sampling_rate:.4f}")
 
-        vars['left_gaze_point_invalid'], vars['right_gaze_point_invalid'], vars['left_gaze_origin_invalid'], vars['right_gaze_origin_invalid'], vars['left_pupil_invalid'], vars['right_pupil_invalid'] = et_invalid_data(et_df)
-        print(f"Percent invalid data in left gaze point: {vars['left_gaze_point_invalid']:.4}%")
-        print(f"Percent invalid data in right gaze point: {vars['right_gaze_point_invalid']:.4}%")
-        print(f"Percent invalid data in left gaze origin: {vars['left_gaze_origin_invalid']:.4}%")
-        print(f"Percent invalid data in right gaze origin: {vars['right_gaze_origin_invalid']:.4}%")
-        print(f"Percent invalid data in left pupil diameter: {vars['left_pupil_invalid']:.4}%")
-        print(f"Percent invalid data in right pupil diameter: {vars['right_pupil_invalid']:.4}%")
-
-        vars['xyz_measures_check'] = xyz_measures_check(val_df)
-        print(f"Flag: all coordinates have the same % validity within each measure (LR, gaze point/origin/diameter): {vars['xyz_measures_check']}")
-
-        vars['coordinate_system_check'] = coordinate_system_check(val_df)
-        print(f"Flag: % of NaNs is the same between coordinate systems (UCS and TBCS (gaze origin) and between UCS and display area (gaze point)): {vars['coordinate_system_check']}")
-
-        vars['LR_mean_diff'] = et_val_LR(val_df)
-        print(f"Mean difference in percent valid data between right and left eyes: {vars['LR_mean_diff']:.4}%")
-
-        vars['percent_over02'] = et_percent_over02(et_df)
-        print(f"Percent of data with gaze point differences of over 0.2 mm: {vars['percent_over02']:.4}%")
-
-        et_lineplot(et_df, vars['percent_over02'], sub_id)
-
+        et_df, vars['blink_perc'], vars['off_screen_perc'], vars['invalid_perc'], vars['valid_perc'] = et_invalid_data(et_df)
+        val_df = et_df[et_df['invalid']==0]
+        print(
+            f"{vars['blink_perc']}% of data detected as blinks. "
+            f"{vars['off_screen_perc']}% of data detected as off screen. "
+            f"{vars['invalid_perc']}% of data invalid. "
+            f"{vars['valid_perc']}% of data valid."
+        )
+        vars['pupil_stats'] = pupil_validity_stats(val_df)
+        print(f"Pupil stats: {vars['pupil_stats']}")
         et_error = None
 
-        return vars, whole_et_df, et_error
+        return vars, et_df, et_error
     # if et_nums is empty
     except ZeroDivisionError: 
         vars['percent_over02'] = float('nan')
@@ -256,4 +204,51 @@ def et_qc(xdf_filename: str, stim_df: pd.DataFrame, task = 'Experiment') -> tupl
 
 # allow the functions in this script to be imported into other scripts
 if __name__ == "__main__":
-    pass
+    parser = argparse.ArgumentParser(description="Run ET QC script")
+    parser.add_argument("xdf_filename", help="Path to the XDF file")
+    parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
+    parser.add_argument("--event", default=None, help="Optional event name to override default")
+
+    args = parser.parse_args()
+
+    xdf_filename = args.xdf_filename
+    stim_fpath = args.stim_fpath
+    event_arg = args.event
+
+    if not os.path.exists(xdf_filename):
+        print(f"Error: file not found -> {xdf_filename}")
+        sys.exit(1)
+
+    if stim_fpath:
+        if not os.path.exists(stim_fpath):
+            print(f"Error: file not found -> {stim_fpath}")
+            sys.exit(1)
+
+        try:
+            if stim_fpath.endswith('.csv'):
+                stim_df = pd.read_csv(stim_fpath)
+            elif stim_fpath.endswith('.parquet'):
+                stim_df = pd.read_parquet(stim_fpath, engine='fastparquet')
+            else:
+                print("Error: stim file must be .csv or .parquet")
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error reading stim file: {e}")
+            sys.exit(1)
+    else:
+        stim_df = False
+
+    default_event = load_default_event(xdf_filename)
+    if default_event is None:
+        print("Warning: no default event found for this task")
+        event = None
+    else:
+        event = default_event
+    if event_arg is not None:
+        event = event_arg
+
+    # try:
+    et_qc(xdf_filename, stim_df, event=event)
+    # except Exception as e:
+    #     print(f"Error running eet_qc: {e}")
+    #     sys.exit(1)
