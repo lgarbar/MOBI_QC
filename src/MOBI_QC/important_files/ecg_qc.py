@@ -181,24 +181,24 @@ def ecg_report_plot(ecg_signals:pd.DataFrame, info: dict, subject:str) -> plt:
 
     return plt
 
-def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame=False, event=None) -> tuple[dict, plt, pd.DataFrame, bool]:
+def ecg_qc(filename:str, stim_df:pd.DataFrame=False, event=None) -> tuple[dict, plt, pd.DataFrame, bool]:
     """
     Performs quality control on ECG data from an XDF file.
     Args:
-        xdf_filename (str): Path to the XDF file.
+        filename (str): Path to the XDF file.
     Returns:
         vars (dict): Quality control metrics for the ECG data.
         fig (matplotlib.pyplot): Generated ECG report plot.
         ecg_error (bool): Indicates whether there was an error loading ECG data. 
     """
-    subject = xdf_filename.split('sub-')[1].split('/')[0]
+    subject = filename.split('sub-')[1].split('/')[0]
     vars = {}
     vars['event'], vars['sampling_rate'], vars['average_heart_rate'], vars['kurtosis_SQI'], vars['power_spectrum_distribution_SQI'], vars['relative_baseline_power_sqi'], vars['SNR'] = np.zeros(7)  
 
     try:
-        ecg_col, ecg_df = import_ecg_data(xdf_filename)
+        ecg_col, ecg_df = import_ecg_data(filename)
         if not stim_df:
-            stim_df = import_stim_data(xdf_filename)
+            stim_df = import_stim_data(filename)
         ecg_df = get_event_data(event=event,
                                 df=ecg_df,
                                 stim_df=stim_df)
@@ -230,7 +230,7 @@ def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame=False, event=None) -> tuple[di
         return vars, fig, ecg_df, ecg_error 
 
     except KeyError:
-        print(f'Error: No ECG data found for participant {subject} in {xdf_filename}.')
+        print(f'Error: No ECG data found for participant {subject} in {filename}.')
         vars.update({key: float('nan') for key in vars.keys()})
         ecg_error = True
         return vars, None, ecg_df, ecg_error
@@ -239,18 +239,18 @@ def ecg_qc(xdf_filename:str, stim_df:pd.DataFrame=False, event=None) -> tuple[di
 # allow the functions in this script to be imported into other scripts
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run ECG QC script")
-    parser.add_argument("xdf_filename", help="Path to the XDF file")
+    parser.add_argument("filename", help="Path to the XDF file")
     parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
     parser.add_argument("--event", default=None, help="Optional event name to override default")
 
     args = parser.parse_args()
 
-    xdf_filename = args.xdf_filename
+    filename = args.filename
     stim_fpath = args.stim_fpath
     event_arg = args.event
 
-    if not os.path.exists(xdf_filename):
-        print(f"Error: file not found -> {xdf_filename}")
+    if not os.path.exists(filename):
+        print(f"Error: file not found -> {filename}")
         sys.exit(1)
 
     if stim_fpath:
@@ -272,7 +272,7 @@ if __name__ == "__main__":
     else:
         stim_df = False
 
-    default_event = load_default_event(xdf_filename)
+    default_event = load_default_event(filename)
     if default_event is None:
         print("Warning: no default event found for this task")
         event = None
@@ -282,7 +282,7 @@ if __name__ == "__main__":
         event = event_arg
 
     try:
-        ecg_qc(xdf_filename, stim_df, event=event)
+        ecg_qc(filename, stim_df, event=event)
     except Exception as e:
         print(f"Error running ecg_qc: {e}")
         sys.exit(1)

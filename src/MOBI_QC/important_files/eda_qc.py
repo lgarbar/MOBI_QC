@@ -169,84 +169,84 @@ def eda_report_plot(eda_signals: pd.DataFrame, info: dict, subject: str) -> plt:
 
     return plt
 
-def eda_qc(xdf_filename: str, stim_df:pd.DataFrame, event=None) -> tuple[dict, plt, plt, pd.DataFrame, bool]:
+def eda_qc(filename: str, stim_df:pd.DataFrame, event=None) -> tuple[dict, plt, plt, pd.DataFrame, bool]:
     """
     Performs quality control on EDA data from an XDF file.
     Args:
-        xdf_filename (str): Path to the XDF file.
+        filename (str): Path to the XDF file.
     Returns:
         vars (dict): Quality control metrics for the EDA data.
         eda_slope_fig (matplotlib.pyplot): SCL trend analysis plot.
         eda_report_fig (matplotlib.pyplot): EDA report plot.
         eda_error (bool): Indicates whether there was an error loading EDA data.
     """
-    subject = xdf_filename.split('sub-')[1].split('/')[0]
-    whole_ps_df = import_physio_data(xdf_filename)
+    subject = filename.split('sub-')[1].split('/')[0]
+    whole_ps_df = import_physio_data(filename)
     if not stim_df:
-        stim_df = import_stim_data(xdf_filename)
+        stim_df = import_stim_data(filename)
     vars = {}
     vars['event'], vars['sampling_rate'], vars['signal_integrity_check'], vars['average_scl'], vars['scl_sd'], vars['scl_cv'], vars['average_scr_amplitude'], vars['scr_validity'], vars['snr'] = np.zeros(9)
 
-    
-    ps_df = get_event_data(event=event, df=whole_ps_df, stim_df=stim_df)
+    try:
+        ps_df = get_event_data(event=event, df=whole_ps_df, stim_df=stim_df)
 
-    eda_col = [col for col in ps_df.columns if 'EDA' in col]
-    if len(eda_col) == 0:
-        raise KeyError("No EDA column found")
-    eda_col = eda_col[0]
-    eda_df = ps_df[[eda_col] + ['lsl_time_stamp', 'time']]
-    eda_sampling_rate = get_sampling_rate(eda_df)
-    eda_signals, info = eda_preprocess(eda_df, eda_sampling_rate, eda_col)
-    average_scl, scl_sd, scl_cv = scl_stability(eda_signals['EDA_Tonic'])
-    average_scr_amplitude, scr_amplitude_validity = scr_amplitudes(info)
-    
-    vars['event'] = event
-    print(f"Effective sampling rate: {eda_sampling_rate:.3f} Hz")
-    vars['sampling_rate'] = eda_sampling_rate
-    print(f"Signal Integrity Check: {eda_signal_integrity_check(eda_df, eda_col):.3f} %")
-    vars['signal_integrity_check'] = eda_signal_integrity_check(eda_df, eda_col)
-    print(f"Average Skin Conductance Level: {average_scl:.3f} mS")
-    vars['average_scl'] = average_scl
-    print(f"Skin Conductance Level Standard deviation: {scl_sd:.3f} mS")
-    vars['scl_sd'] = scl_sd
-    print(f"Skin Conductance Level Coefficient of Variation: {scl_cv:.3f} %")
-    vars['scl_cv'] = scl_cv
-    print(f"Average Amplitude of Skin Conductance Response: {average_scr_amplitude:.3f} mS")
-    vars['average_scr_amplitude'] = average_scr_amplitude
-    print(f"Skin Conductance Response Validity: {scr_amplitude_validity:.3f} %")
-    vars['scr_validity'] = scr_amplitude_validity
-    print(f"Signal to Noise Ratio: {eda_snr(eda_signals, eda_df, eda_sampling_rate, eda_col):.3f} dB")
-    vars['snr'] = eda_snr(eda_signals, eda_df, eda_sampling_rate, eda_col)
+        eda_col = [col for col in ps_df.columns if 'EDA' in col]
+        if len(eda_col) == 0:
+            raise KeyError("No EDA column found")
+        eda_col = eda_col[0]
+        eda_df = ps_df[[eda_col] + ['lsl_time_stamp', 'time']]
+        eda_sampling_rate = get_sampling_rate(eda_df)
+        eda_signals, info = eda_preprocess(eda_df, eda_sampling_rate, eda_col)
+        average_scl, scl_sd, scl_cv = scl_stability(eda_signals['EDA_Tonic'])
+        average_scr_amplitude, scr_amplitude_validity = scr_amplitudes(info)
+        
+        vars['event'] = event
+        print(f"Effective sampling rate: {eda_sampling_rate:.3f} Hz")
+        vars['sampling_rate'] = eda_sampling_rate
+        print(f"Signal Integrity Check: {eda_signal_integrity_check(eda_df, eda_col):.3f} %")
+        vars['signal_integrity_check'] = eda_signal_integrity_check(eda_df, eda_col)
+        print(f"Average Skin Conductance Level: {average_scl:.3f} mS")
+        vars['average_scl'] = average_scl
+        print(f"Skin Conductance Level Standard deviation: {scl_sd:.3f} mS")
+        vars['scl_sd'] = scl_sd
+        print(f"Skin Conductance Level Coefficient of Variation: {scl_cv:.3f} %")
+        vars['scl_cv'] = scl_cv
+        print(f"Average Amplitude of Skin Conductance Response: {average_scr_amplitude:.3f} mS")
+        vars['average_scr_amplitude'] = average_scr_amplitude
+        print(f"Skin Conductance Response Validity: {scr_amplitude_validity:.3f} %")
+        vars['scr_validity'] = scr_amplitude_validity
+        print(f"Signal to Noise Ratio: {eda_snr(eda_signals, eda_df, eda_sampling_rate, eda_col):.3f} dB")
+        vars['snr'] = eda_snr(eda_signals, eda_df, eda_sampling_rate, eda_col)
 
-    eda_slope_fig = scl_trend_analysis(eda_signals, eda_df, eda_sampling_rate, subject)
-    eda_report_fig = eda_report_plot(eda_signals, info, subject)
-    
-    eda_error = False
-    return vars, eda_slope_fig, eda_report_fig, whole_ps_df, eda_error
+        eda_slope_fig = scl_trend_analysis(eda_signals, eda_df, eda_sampling_rate, subject)
+        eda_report_fig = eda_report_plot(eda_signals, info, subject)
+        
+        eda_error = False
+        return vars, eda_slope_fig, eda_report_fig, whole_ps_df, eda_error
 
-    # except KeyError: 
-    #     print(f'Error: No EDA data found for participant {subject} in {xdf_filename}.')
-    #     vars.update({key: float('nan') for key in vars.keys()})
-    #     eda_error = True
-    #     eda_slope_fig = None
-    #     eda_report_fig = None
-    #     return vars, eda_slope_fig, eda_report_fig, whole_ps_df, eda_error
+    except KeyError: 
+        print(f'Error: No EDA data found for participant {subject} in {filename}.')
+        vars.update({key: float('nan') for key in vars.keys()})
+        eda_error = True
+        eda_slope_fig = None
+        eda_report_fig = None
+        return vars, eda_slope_fig, eda_report_fig, whole_ps_df, eda_error
 
 #%%
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run ECG QC script")
-    parser.add_argument("xdf_filename", help="Path to the XDF file")
+    parser.add_argument("filename", help="Path to the XDF file")
     parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
     parser.add_argument("--event", default=None, help="Optional event name to override default")
 
     args = parser.parse_args()
 
-    xdf_filename = args.xdf_filename
+    filename = args.filename
     stim_fpath = args.stim_fpath
     event_arg = args.event
 
-    if not os.path.exists(xdf_filename):
-        print(f"Error: file not found -> {xdf_filename}")
+    if not os.path.exists(filename):
+        print(f"Error: file not found -> {filename}")
         sys.exit(1)
 
     if stim_fpath:
@@ -268,7 +268,7 @@ if __name__ == "__main__":
     else:
         stim_df = False
 
-    default_event = load_default_event(xdf_filename)
+    default_event = load_default_event(filename)
     if default_event is None:
         print("Warning: no default event found for this task")
         event = None
@@ -277,8 +277,8 @@ if __name__ == "__main__":
     if event_arg is not None:
         event = event_arg
 
-    # try:
-    eda_qc(xdf_filename, stim_df, event=event)
-    # except Exception as e:
-    #     print(f"Error running ecg_qc: {e}")
-    #     sys.exit(1)
+    try:
+        eda_qc(filename, stim_df, event=event)
+    except Exception as e:
+        print(f"Error running ecg_qc: {e}")
+        sys.exit(1)
