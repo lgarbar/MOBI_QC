@@ -47,16 +47,17 @@ def et_invalid_data(et_df: pd.DataFrame) -> tuple[float, float, float, float, fl
     et_df['off_screen_filt'] = 0
 
     # masks
-    blink_mask = et_df['blink_confidence'].apply(lambda data: data[0] > 0.5 or data[1] > 0.5)
-    offscreen_mask = et_df['ET3S_scene_number'] != 0
-
-    # mark blinks
-    et_df.loc[blink_mask, 'blink_filt'] = 1
-    et_df.loc[blink_mask, 'invalid'] = 1
-
-    # mark off-screen
-    et_df.loc[offscreen_mask, 'off_screen_filt'] = 1
-    et_df.loc[offscreen_mask, 'invalid'] = 1
+    if 'blink_confidence' in et_df:
+        blink_mask = et_df['blink_confidence'].apply(
+            lambda data: (data is not None and len(data) >= 2 and (data[0] > 0.5 or data[1] > 0.5))
+        )
+        et_df.loc[blink_mask, 'blink_filt'] = 1
+        et_df.loc[blink_mask, 'invalid'] = 1
+    
+    if 'ET3S_scene_number' in et_df:
+        offscreen_mask = et_df['ET3S_scene_number'] != 0
+        et_df.loc[offscreen_mask, 'off_screen_filt'] = 1
+        et_df.loc[offscreen_mask, 'invalid'] = 1
 
     blink_filt = et_df[et_df['blink_filt'] == 1]
     off_screen_filt = et_df[et_df['off_screen_filt'] == 1]
@@ -147,11 +148,11 @@ def pupil_validity_stats(et_df_filt: pd.DataFrame) -> dict:
     return stats
 
 
-def et_qc(xdf_filename: str, stim_df: pd.DataFrame, event=None) -> tuple[dict, pd.DataFrame, str]:
+def et_qc(filename: str, stim_df: pd.DataFrame, event=None) -> tuple[dict, pd.DataFrame, str]:
     """
     Main function to extract eye tracking quality control metrics.
     Args:
-        xdf_filename (str): Path to the XDF file containing eye-tracking data.
+        filename (str): Path to the XDF file containing eye-tracking data.
         stim_df (pd.DataFrame): dataframe containing stimulus markers.
         task (str): arm of the experiment for which user wants quality control performed.
     Returns:
@@ -160,63 +161,63 @@ def et_qc(xdf_filename: str, stim_df: pd.DataFrame, event=None) -> tuple[dict, p
         et_error (bool): Whether there was an error loading eye tracking data.
 
     """
-    sub_id = xdf_filename.split('sub-')[1].split('/')[0]
+    sub_id = filename.split('sub-')[1].split('/')[0]
     vars = {}
     vars['event'], vars['sampling_rate'], vars['left_gaze_point_invalid'], vars['right_gaze_point_invalid'], vars['left_gaze_origin_invalid'], vars['right_gaze_origin_invalid'], vars['left_pupil_invalid'], vars['right_pupil_invalid'], vars['xyz_measures_check'], vars['coordinate_system_check'], vars['LR_mean_diff'], vars['percent_over02'] = np.zeros(12)
 
-    try:
-        whole_et_df = import_et_data(xdf_filename)
-        if not stim_df:
-            stim_df = import_stim_data(xdf_filename)
-        et_df = get_event_data(event = event, df = whole_et_df, stim_df = stim_df)
+    # try:
+    whole_et_df = import_et_data(filename)
+    if not stim_df:
+        stim_df = import_stim_data(filename)
+    et_df = get_event_data(event = event, df = whole_et_df, stim_df = stim_df)
 
-        sampling_rate = get_sampling_rate(et_df)
-        vars['event'] = event
-        vars['sampling_rate'] = sampling_rate
-        print(f"Effective sampling rate: {sampling_rate:.4f}")
+    sampling_rate = get_sampling_rate(et_df)
+    vars['event'] = event
+    vars['sampling_rate'] = sampling_rate
+    print(f"Effective sampling rate: {sampling_rate:.4f}")
 
-        et_df, vars['blink_perc'], vars['off_screen_perc'], vars['invalid_perc'], vars['valid_perc'] = et_invalid_data(et_df)
-        val_df = et_df[et_df['invalid']==0]
-        print(
-            f"{vars['blink_perc']}% of data detected as blinks. "
-            f"{vars['off_screen_perc']}% of data detected as off screen. "
-            f"{vars['invalid_perc']}% of data invalid. "
-            f"{vars['valid_perc']}% of data valid."
-        )
-        vars['pupil_stats'] = pupil_validity_stats(val_df)
-        print(f"Pupil stats: {vars['pupil_stats']}")
-        et_error = None
+    et_df, vars['blink_perc'], vars['off_screen_perc'], vars['invalid_perc'], vars['valid_perc'] = et_invalid_data(et_df)
+    val_df = et_df[et_df['invalid']==0]
+    print(
+        f"{vars['blink_perc']}% of data detected as blinks. "
+        f"{vars['off_screen_perc']}% of data detected as off screen. "
+        f"{vars['invalid_perc']}% of data invalid. "
+        f"{vars['valid_perc']}% of data valid."
+    )
+    vars['pupil_stats'] = pupil_validity_stats(val_df)
+    print(f"Pupil stats: {vars['pupil_stats']}")
+    et_error = None
 
-        return vars, et_df, et_error
-    # if et_nums is empty
-    except ZeroDivisionError: 
-        vars['percent_over02'] = float('nan')
-        et_error = 'missing_data'        
-        print(f'Error: Significant amount of ET data missing for participant {sub_id} in {xdf_filename}.')
-        return vars, whole_et_df, et_error
-    except: # leaving this without a specific error for now because we have no PTs without ET data!
+    return vars, et_df, et_error
+    # # if et_nums is empty
+    # except ZeroDivisionError: 
+    #     vars['percent_over02'] = float('nan')
+    #     et_error = 'missing_data'        
+    #     print(f'Error: Significant amount of ET data missing for participant {sub_id} in {filename}.')
+    #     return vars, whole_et_df, et_error
+    # except: # leaving this without a specific error for now because we have no PTs without ET data!
         
-        whole_et_df = pd.DataFrame()
-        vars.update({key: float('nan') for key in vars.keys()})
-        et_error = 'no_data'
-        print(f'Error: No ET data found for participant {sub_id} in {xdf_filename}.')
-        return vars, whole_et_df, et_error
+    #     whole_et_df = pd.DataFrame()
+    #     vars.update({key: float('nan') for key in vars.keys()})
+    #     et_error = 'no_data'
+    #     print(f'Error: No ET data found for participant {sub_id} in {filename}.')
+    #     return vars, whole_et_df, et_error
 
 # allow the functions in this script to be imported into other scripts
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run ET QC script")
-    parser.add_argument("xdf_filename", help="Path to the XDF file")
+    parser.add_argument("filename", help="Path to the XDF file")
     parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
     parser.add_argument("--event", default=None, help="Optional event name to override default")
 
     args = parser.parse_args()
 
-    xdf_filename = args.xdf_filename
+    filename = args.filename
     stim_fpath = args.stim_fpath
     event_arg = args.event
 
-    if not os.path.exists(xdf_filename):
-        print(f"Error: file not found -> {xdf_filename}")
+    if not os.path.exists(filename):
+        print(f"Error: file not found -> {filename}")
         sys.exit(1)
 
     if stim_fpath:
@@ -238,7 +239,7 @@ if __name__ == "__main__":
     else:
         stim_df = False
 
-    default_event = load_default_event(xdf_filename)
+    default_event = load_default_event(filename)
     if default_event is None:
         print("Warning: no default event found for this task")
         event = None
@@ -248,7 +249,7 @@ if __name__ == "__main__":
         event = event_arg
 
     # try:
-    et_qc(xdf_filename, stim_df, event=event)
+    et_qc(filename, stim_df, event=event)
     # except Exception as e:
     #     print(f"Error running eet_qc: {e}")
     #     sys.exit(1)
