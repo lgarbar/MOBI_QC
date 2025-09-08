@@ -169,7 +169,7 @@ def eda_report_plot(eda_signals: pd.DataFrame, info: dict, subject: str) -> plt:
 
     return plt
 
-def eda_qc(filename: str, stim_df:pd.DataFrame, event=None) -> tuple[dict, plt, plt, pd.DataFrame, bool]:
+def eda_qc(filename:str, stim_df:pd.DataFrame=False, event:str=None, outpath:str=None) -> tuple[dict, plt, plt, pd.DataFrame, bool]:
     """
     Performs quality control on EDA data from an XDF file.
     Args:
@@ -222,6 +222,8 @@ def eda_qc(filename: str, stim_df:pd.DataFrame, event=None) -> tuple[dict, plt, 
         eda_report_fig = eda_report_plot(eda_signals, info, subject)
         
         eda_error = False
+        if outpath:
+            eda_df.to_csv(outpath)
         return vars, eda_slope_fig, eda_report_fig, whole_ps_df, eda_error
 
     except KeyError: 
@@ -235,15 +237,19 @@ def eda_qc(filename: str, stim_df:pd.DataFrame, event=None) -> tuple[dict, plt, 
 #%%
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run ECG QC script")
-    parser.add_argument("filename", help="Path to the XDF file")
+    parser.add_argument("filename", help="Path to the XDF/NWB file")
     parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
     parser.add_argument("--event", default=None, help="Optional event name to override default")
+    parser.add_argument("--outpath", default=None, help="Optional parameter to save extracted ecg data as csv")
+    parser.add_argument("--autosave", default=False, help="Optional parameter to automatically save extracted ecg data as csv in filename directory")
 
     args = parser.parse_args()
 
     filename = args.filename
     stim_fpath = args.stim_fpath
     event_arg = args.event
+    outpath_arg = args.outpath
+    autosave_arg = args.autosave
 
     if not os.path.exists(filename):
         print(f"Error: file not found -> {filename}")
@@ -277,8 +283,15 @@ if __name__ == "__main__":
     if event_arg is not None:
         event = event_arg
 
+    outpath = None
+    if outpath_arg is not None:
+        outpath = outpath_arg
+    elif autosave_arg:
+        dirs, file = ('/').join(filename.split('/')[:-1]), filename.split('/')[-1]
+        outpath = os.path.join(dirs, f"{('_').join(file.split('_')[:-1])}_ecg.csv")
+
     try:
-        eda_qc(filename, stim_df, event=event)
+        eda_qc(filename, stim_df, event=event, outpath=outpath)
     except Exception as e:
         print(f"Error running ecg_qc: {e}")
         sys.exit(1)
