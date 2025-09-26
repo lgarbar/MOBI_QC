@@ -13,11 +13,16 @@ from tqdm import tqdm
 import datetime
 from stim_correction import trigger_recovery
 from scipy.interpolate import interp1d
+from pynwb import NWBHDF5IO
 
+def load_default_event(xdf_filename, config_path=None):
+    if config_path is None:
+        here = os.path.dirname(__file__)  # directory where *this* file lives
+        config_path = os.path.join(here, "default_event.json")
 
-def load_default_event(xdf_filename, config_path="default_event.json"):
     with open(config_path, "r") as f:
         config = json.load(f)
+
     for task, event in config.items():
         if task.lower() in xdf_filename.lower():
             return event
@@ -61,17 +66,33 @@ def import_webcam_data(xdf_filename:str):
     cam_df['lsl_time_sec'] = (cam_df.lsl_time_stamp - cam_df.lsl_time_stamp[0]) *1000
     return cam_df
 
+def import_physio_data(filename:str):
+    if '.xdf' in filename:
+        data, _ = pyxdf.load_xdf(filename, select_streams=[{'name': 'OpenSignals'}], verbose = False)
+        column_labels = [data[0]['info']['desc'][0]['channels'][0]['channel'][i]['label'][0] for i in range(len(data[0]['info']['desc'][0]['channels'][0]['channel']))]
+        df = pd.DataFrame(data[0]['time_series'], columns=column_labels)
+        df['lsl_time_stamp'] = data[0]['time_stamps']
+    elif '.nwb' in filename:
+        io = NWBHDF5IO(filename, mode='r')
+        nwbfile = io.read()
 
-def import_physio_data(xdf_filename:str):
-    data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'name': 'OpenSignals'}], verbose = False)
-    column_labels = [data[0]['info']['desc'][0]['channels'][0]['channel'][i]['label'][0] for i in range(len(data[0]['info']['desc'][0]['channels'][0]['channel']))]
-    df = pd.DataFrame(data[0]['time_series'], columns=column_labels)
-    df['lsl_time_stamp'] = data[0]['time_stamps']
-    df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
+        os_key = [label for label in list(nwbfile.acquisition.keys()) if 'opensignal' in label.lower()][0]
+        stream = nwbfile.acquisition[os_key]
+        channels = channels = pd.Series(stream.description.split(','))
+        data = stream.data[:]
+        timestamps = stream.timestamps[:]
+
+        df = pd.DataFrame(data, columns=channels)
+        df['lsl_time_stamp'] = timestamps
+        df['nSeq'] = df.index
+
+        io.close()
+    
+    df['time'] = df['lsl_time_stamp'] - df.loc[0, 'lsl_time_stamp']
     return df
 
-def import_ecg_data(xdf_filename:str):
-    df = import_physio_data(xdf_filename)
+def import_ecg_data(filename:str):
+    df = import_physio_data(filename)
     ecg_col = [col for col in df.columns if 'ECG' in col]
     if ecg_col:
         ecg_col = ecg_col[0]
@@ -161,25 +182,95 @@ def align_and_resample(df1, df2, srate=30, time_col="time"):
     merged = pd.merge(et_resampled, bh_resampled, on=time_col, suffixes=("_et", "_bh"))
     return merged
 
-def import_et_data(xdf_filename:str):
-    data, _ = pyxdf.load_xdf(xdf_filename, verbose = False)
-    streams = get_stream_names(data)
-    et_stream_name = find_et_stream_name(streams)
-    data = data[streams[et_stream_name]]
-    column_labels = [data['info']['desc'][0]['channels'][0]['channel'][i]['label'][0] for i in range(len(data['info']['desc'][0]['channels'][0]['channel']))]
-    df = pd.DataFrame(data['time_series'], columns=column_labels)
-    df = convert_cols_to_num(df)
-    df['lsl_time_stamp'] = data['time_stamps']
+def import_et_data(filename:str):
+    if '.xdf' in filename:
+        data, _ = pyxdf.load_xdf(filename, verbose = False)
+        streams = get_stream_names(data)
+        et_stream_name = find_et_stream_name(streams)
+        data = data[streams[et_stream_name]]
+        column_labels = [data['info']['desc'][0]['channels'][0]['channel'][i]['label'][0] for i in range(len(data['info']['desc'][0]['channels'][0]['channel']))]
+        df = pd.DataFrame(data['time_series'], columns=column_labels)
+        df = convert_cols_to_num(df)
+        timestamps = data['time_stamps']
+        df['pupil_left'] = df['pupil_diam'].apply(lambda x: x[0])
+        df['pupil_right'] = df['pupil_diam'].apply(lambda x: x[1])
+    elif '.nwb' in filename:
+        io = NWBHDF5IO(filename, mode='r')
+        nwbfile = io.read()
+
+        et_df = None
+        et_streams = [
+            'Eyetrack_Argus_4',
+            'Head_Location_Argus_4',
+            'Head_Rotation_Argus_4',
+            'Monitor_Eyetrack_Argus_4',
+            'Pupil_Diameters_Argus_4'
+        ]
+        for stream_name in et_streams:
+            stream = nwbfile.acquisition[stream_name]
+
+            # Detect type
+            if hasattr(stream, 'spatial_series'):
+                # SpatialSeries container (e.g., head location)
+                key = list(stream.spatial_series.keys())[0]
+                ss = stream.spatial_series[key]
+                data = np.array(ss.data)
+                timestamps = np.array(ss.timestamps)
+                if '[' in ss.description:
+                    channels = ss.description.split('[')[1].split(']')[0].split(',')
+                elif ss.description == 'Tracking position of eyes':
+                    channels = ['horz_gaze_coord', 'vert_gaze_coord']
+                elif ss.description == 'Tracking where on the monitor the eyes are looking':
+                    channels = ['ET3S_horz_gaze_coord', 'ET3S_vert_gaze_coord']
+                else:
+                    channels = pd.Series(ss.description.split(',')).str.strip()
+            else:
+                # Generic TimeSeries
+                data = np.array(stream.data)
+                timestamps = np.array(stream.timestamps)
+                # Use stream name or description as column
+                if '[' in stream.description:
+                    channels = [ch.strip() for ch in stream.description.split('[')[1].split(']')[0].split(',')]
+                else:
+                    channels = stream.description.split(',')
+
+            # Flatten if single column
+            if data.ndim == 1:
+                data = data.flatten()
+                df = pd.DataFrame(data, columns=channels)
+            else:
+                # Multiple columns
+                n_cols = data.shape[1]
+                if len(channels) != n_cols:
+                    channels = [f'ch{i}' for i in range(n_cols)]
+                df = pd.DataFrame(data, columns=channels)
+
+            df['timestamps'] = timestamps
+
+            # Merge
+            if et_df is None:
+                et_df = df
+            else:
+                et_df = pd.merge(et_df.reset_index(drop=True), df.reset_index(drop=True), on='timestamps')
+
+        columns = {'x(cm)': 'hdtrk_X', 
+                   ' y(cm)': 'hdtrk_Y',
+                   ' z(cm)': 'hdtrk_Z',
+                   'left eye': 'pupil_left',
+                   'right eye': 'pupil_right'}
+
+        et_df = et_df.rename(columns=columns)
+        et_df['nSeq'] = et_df.index
+        df = et_df.copy()
+        io.close()
+        
+    df['lsl_time_stamp'] = timestamps
     df['time'] = df.lsl_time_stamp - df.lsl_time_stamp[0]
     df['diff'] = df.lsl_time_stamp.diff()
 
-    df['pupil_left'] = df['pupil_diam'].apply(lambda x: x[0])
-    df['pupil_right'] = df['pupil_diam'].apply(lambda x: x[1])
-
     df['pupil_mean'] = df[['pupil_left', 'pupil_right']].apply(
         lambda row: row[row != 0].mean(),
-        axis=1
-    )
+        axis=1).fillna(0)
     df['pupil_smooth'] = df['pupil_mean'].rolling(window=5, center=True).mean()
     df['pupil_smooth'] = df['pupil_smooth'].fillna(df['pupil_mean'])
     return df
@@ -218,17 +309,34 @@ def reformat_events(stim_df: pd.DataFrame, task:str=None):
 
     return stim_df
 
-def import_stim_data(xdf_filename:str):
+def import_stim_data(filename:str):
     '''
     Get the stimuli dataframe from the xdf file.
     
     Args:
         xdf_filename (str): The xdf file to get the stimuli from.
     '''
-    data, _ = pyxdf.load_xdf(xdf_filename, select_streams=[{'name':'StimLabels'}], verbose = False)
-    stim_df = pd.DataFrame(data[0]['time_series'])
-    stim_df.rename(columns={0: 'event'}, inplace=True)
-    task = xdf_filename.split('/')[-1].split('task-')[-1].split('_')[0]
+    task = filename.split('/')[-1].split('task-')[-1].split('_')[0]
+    if '.xdf' in filename:
+        data, _ = pyxdf.load_xdf(filename, select_streams=[{'name':'StimLabels'}], verbose = False)
+        stim_df = pd.DataFrame(data[0]['time_series'])
+        stim_df.rename(columns={0: 'event'}, inplace=True)
+        timestamps = data[0]['time_stamps']
+    elif '.nwb' in filename:
+        io = NWBHDF5IO(filename, mode='r')
+        nwbfile = io.read()
+
+        os_key = [label for label in list(nwbfile.acquisition.keys()) if 'stim' in label.lower()][0]
+        stream = nwbfile.acquisition[os_key]
+        channels = pd.Series(stream.description.split(','))
+        idx = channels[channels.str.contains('ECG')].index
+        data = stream.data[:]
+        timestamps = stream.timestamps[:]
+
+        stim_df = pd.DataFrame(data, columns=channels)
+        stim_df['nSeq'] = stim_df.index
+        stim_df.rename(columns={'Stimlabels': 'event'}, inplace=True)
+        io.close()
 
     # MAY NEED TO BE REFORMATTED/Have more codes/events added
     events = {
@@ -243,10 +351,9 @@ def import_stim_data(xdf_filename:str):
     # COME BACK TO THESE TIME THINGS
     # relabel the event as a psychopy timestamp if the trigger is greater than 5 digits
     stim_df.loc[stim_df.trigger.astype(str).str.len() > 5, 'event'] = 'psychopy_time_stamp'
-    stim_df['lsl_time_stamp'] = data[0]['time_stamps']
-    stim_df['time'] = (data[0]['time_stamps'] - data[0]['time_stamps'][0])
+    stim_df['lsl_time_stamp'] = timestamps
+    stim_df['time'] = stim_df['lsl_time_stamp'] - stim_df.loc[0, 'lsl_time_stamp']
     stim_df = reformat_events(stim_df, task=task)
-    
     return stim_df
 
 def get_event_data(event, df, stim_df):

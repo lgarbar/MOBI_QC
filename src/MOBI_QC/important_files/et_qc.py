@@ -53,11 +53,23 @@ def et_invalid_data(et_df: pd.DataFrame) -> tuple[float, float, float, float, fl
         )
         et_df.loc[blink_mask, 'blink_filt'] = 1
         et_df.loc[blink_mask, 'invalid'] = 1
-    
+    else:
+        blink_mask = np.sort(
+            list(
+                set(np.where(et_df['pupil_mean'] == 0)[0])
+                | set(np.where(et_df['ET3S_horz_gaze_coord'] == 0)[0])
+                | set(np.where(et_df['ET3S_vert_gaze_coord'] == 0)[0])
+            )
+        )
+        et_df.loc[blink_mask, 'blink_filt'] = 1
+        et_df.loc[blink_mask, 'invalid'] = 1
+
     if 'ET3S_scene_number' in et_df:
         offscreen_mask = et_df['ET3S_scene_number'] != 0
         et_df.loc[offscreen_mask, 'off_screen_filt'] = 1
         et_df.loc[offscreen_mask, 'invalid'] = 1
+    else:
+        et_df.loc[:, 'off_screen_filt'] = 1
 
     blink_filt = et_df[et_df['blink_filt'] == 1]
     off_screen_filt = et_df[et_df['off_screen_filt'] == 1]
@@ -148,7 +160,7 @@ def pupil_validity_stats(et_df_filt: pd.DataFrame) -> dict:
     return stats
 
 
-def et_qc(filename: str, stim_df: pd.DataFrame, event=None) -> tuple[dict, pd.DataFrame, str]:
+def et_qc(filename: str, stim_df: pd.DataFrame, event=None, output=None) -> tuple[dict, pd.DataFrame, str]:
     """
     Main function to extract eye tracking quality control metrics.
     Args:
@@ -165,43 +177,43 @@ def et_qc(filename: str, stim_df: pd.DataFrame, event=None) -> tuple[dict, pd.Da
     vars = {}
     vars['event'], vars['sampling_rate'], vars['left_gaze_point_invalid'], vars['right_gaze_point_invalid'], vars['left_gaze_origin_invalid'], vars['right_gaze_origin_invalid'], vars['left_pupil_invalid'], vars['right_pupil_invalid'], vars['xyz_measures_check'], vars['coordinate_system_check'], vars['LR_mean_diff'], vars['percent_over02'] = np.zeros(12)
 
-    # try:
-    whole_et_df = import_et_data(filename)
-    if not stim_df:
-        stim_df = import_stim_data(filename)
-    et_df = get_event_data(event = event, df = whole_et_df, stim_df = stim_df)
+    try:
+        whole_et_df = import_et_data(filename)
+        if not stim_df:
+            stim_df = import_stim_data(filename)
+        et_df = get_event_data(event = event, df = whole_et_df, stim_df = stim_df)
 
-    sampling_rate = get_sampling_rate(et_df)
-    vars['event'] = event
-    vars['sampling_rate'] = sampling_rate
-    print(f"Effective sampling rate: {sampling_rate:.4f}")
+        sampling_rate = get_sampling_rate(et_df)
+        vars['event'] = event
+        vars['sampling_rate'] = sampling_rate
+        print(f"Effective sampling rate: {sampling_rate:.4f}")
 
-    et_df, vars['blink_perc'], vars['off_screen_perc'], vars['invalid_perc'], vars['valid_perc'] = et_invalid_data(et_df)
-    val_df = et_df[et_df['invalid']==0]
-    print(
-        f"{vars['blink_perc']}% of data detected as blinks. "
-        f"{vars['off_screen_perc']}% of data detected as off screen. "
-        f"{vars['invalid_perc']}% of data invalid. "
-        f"{vars['valid_perc']}% of data valid."
-    )
-    vars['pupil_stats'] = pupil_validity_stats(val_df)
-    print(f"Pupil stats: {vars['pupil_stats']}")
-    et_error = None
+        et_df, vars['blink_perc'], vars['off_screen_perc'], vars['invalid_perc'], vars['valid_perc'] = et_invalid_data(et_df)
+        val_df = et_df[et_df['invalid']==0]
+        print(
+            f"{vars['blink_perc']}% of data detected as blinks. "
+            f"{vars['off_screen_perc']}% of data detected as off screen. "
+            f"{vars['invalid_perc']}% of data invalid. "
+            f"{vars['valid_perc']}% of data valid."
+        )
+        vars['pupil_stats'] = pupil_validity_stats(val_df)
+        print(f"Pupil stats: {vars['pupil_stats']}")
+        et_error = None
 
-    return vars, et_df, et_error
-    # # if et_nums is empty
-    # except ZeroDivisionError: 
-    #     vars['percent_over02'] = float('nan')
-    #     et_error = 'missing_data'        
-    #     print(f'Error: Significant amount of ET data missing for participant {sub_id} in {filename}.')
-    #     return vars, whole_et_df, et_error
-    # except: # leaving this without a specific error for now because we have no PTs without ET data!
+        return vars, et_df, et_error
+    # if et_nums is empty
+    except ZeroDivisionError: 
+        vars['percent_over02'] = float('nan')
+        et_error = 'missing_data'        
+        print(f'Error: Significant amount of ET data missing for participant {sub_id} in {filename}.')
+        return vars, whole_et_df, et_error
+    except: # leaving this without a specific error for now because we have no PTs without ET data!
         
-    #     whole_et_df = pd.DataFrame()
-    #     vars.update({key: float('nan') for key in vars.keys()})
-    #     et_error = 'no_data'
-    #     print(f'Error: No ET data found for participant {sub_id} in {filename}.')
-    #     return vars, whole_et_df, et_error
+        whole_et_df = pd.DataFrame()
+        vars.update({key: float('nan') for key in vars.keys()})
+        et_error = 'no_data'
+        print(f'Error: No ET data found for participant {sub_id} in {filename}.')
+        return vars, whole_et_df, et_error
 
 # allow the functions in this script to be imported into other scripts
 if __name__ == "__main__":
@@ -209,6 +221,7 @@ if __name__ == "__main__":
     parser.add_argument("filename", help="Path to the XDF file")
     parser.add_argument("stim_fpath", nargs="?", default=None, help="Optional path to stim file (.csv or .parquet)")
     parser.add_argument("--event", default=None, help="Optional event name to override default")
+    parser.add_argument("--output", default=None, help="Optional output path for results")
 
     args = parser.parse_args()
 
@@ -248,8 +261,8 @@ if __name__ == "__main__":
     if event_arg is not None:
         event = event_arg
 
-    # try:
-    et_qc(filename, stim_df, event=event)
-    # except Exception as e:
-    #     print(f"Error running eet_qc: {e}")
-    #     sys.exit(1)
+    try:
+        et_qc(filename, stim_df, event=event, output=args.output)
+    except Exception as e:
+        print(f"Error running et_qc: {e}")
+        sys.exit(1)
